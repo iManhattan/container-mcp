@@ -1,94 +1,31 @@
-# Embedded Safe Docker MCP Server
+# Embedded Docker MCP Server
 
-A robust, high-performance, and secure **Model Context Protocol (MCP)** server tailored for embedded Linux systems and industrial controllers (PLCs, IoT Edge, Codesys/Nexto, and Buildroot environments) running Docker.
-
-It serves as a full-featured, headless, and agent-ready replacement for **Portainer**, allowing AI agents (such as Antigravity, Claude, and custom autonomous workflows) to perform automated container lifecycle operations, stack deployments, network diagnostics, and storage management **without granting shell or terminal access** to the host.
+A lightweight and secure **Model Context Protocol (MCP)** server for interacting with Docker environments via AI assistants and automation tools without exposing terminal or host shell access.
 
 ---
 
-## 🔒 Security & Hardening Principles
+## Features
 
-Embedded systems and industrial devices must remain isolated from unauthorized terminal or shell escapes (`/bin/sh`, `/bin/bash`):
-
-1. **No Interactive Shell / Exec**: Unlike Portainer, this server exposes strictly typed JSON-RPC tools. It contains **no execution mechanisms** for arbitrary host or container shell commands.
-2. **Defensive Volume Restrictions**: The server explicitly forbids mounting host root (`/`) or Docker sockets into child containers created by agents.
-3. **Protected Containers**: Critical system containers (such as the MCP server itself) are whitelisted and immune to remote stop, restart, or removal operations.
-4. **Lightweight Footprint**: Optimized multi-stage Alpine build consuming **< 70 MB of RAM** and negligible CPU overhead, perfect for memory-constrained embedded hardware.
+- **Safe Automation**: Full Docker lifecycle management via structured JSON-RPC tools with zero interactive shell access.
+- **Compose Stacks**: Deploy, list, inspect, and remove multi-container stacks.
+- **Resource Management**: Manage containers, images, persistent volumes, and networks.
+- **Embedded Friendly**: Minimal resource consumption (< 70 MB RAM) running on x86_64 and ARM64 architectures.
 
 ---
 
-## 🛠️ Complete MCP Tool Catalog
+## Installation
 
-### 1. Stack Management (Docker Compose)
-- `deploy_stack(stack_name: str, compose_yaml: str)`: Deploys a full multi-container application stack from a Docker Compose YAML string. Automatically provisions networks, pulls images, and injects official Portainer-compatible compose labels.
-- `list_stacks()`: Lists all deployed stacks with service counts and container states.
-- `inspect_stack(stack_name: str)`: Details all containers, images, ports, and states associated with a specific stack.
-- `remove_stack(stack_name: str)`: Gracefully stops and tears down all containers and networks belonging to a stack.
+### 1. Docker Compose (Recommended)
 
-### 2. Container Lifecycle & Operations
-- `create_container(image, name, ports, env, volumes, cmd, restart_policy, auto_start)`: Provisions and optionally starts a new container with built-in parameter validation.
-- `list_containers(all: bool)`: Enumerates running or all containers with IDs, names, images, states, and port mappings.
-- `inspect_container(name_or_id: str)`: Retrieves container metadata (IP addresses, port bindings, environment variables, restart counts).
-- `start_container(name_or_id: str)`: Starts a stopped container.
-- `stop_container(name_or_id: str)`: Gracefully stops an active container.
-- `restart_container(name_or_id: str)`: Safely restarts a container.
-- `pause_container(name_or_id: str)` / `unpause_container(name_or_id: str)`: Freezes and unfreezes container execution without restarts.
-- `remove_container(name_or_id: str, force: bool)`: Deletes a container from the system.
-- `rename_container(name_or_id: str, new_name: str)`: Renames an existing container.
-- `get_container_logs(name_or_id: str, tail: int)`: Collects stdout/stderr output for remote diagnostics.
-- `get_container_stats(name_or_id: str)`: Real-time telemetry reporting memory usage (MB / %), memory limits, and CPU load.
-
-### 3. Image Management
-- `list_images()`: Lists all locally cached Docker images, tags, and sizes in MB.
-- `pull_image(image_name: str)`: Pulls a new image from Docker Hub or a private registry.
-- `remove_image(image_name_or_id: str, force: bool)`: Deletes an image to reclaim embedded flash storage.
-
-### 4. Networking & Ethernet Interfaces
-- `get_ethernet_interfaces()`: Reads physical and virtual host interfaces (e.g., `eth0`, `eth1`, `docker0`) and live network throughput (RX/TX in MB).
-- `list_networks()`: Lists Docker networks (bridge, host, macvlan) and attached container counts.
-- `inspect_network(network_name_or_id: str)`: Details IPAM subnets, gateways, and attached container IPs and MAC addresses.
-- `create_network(name, driver, subnet, gateway)`: Creates custom subnets with custom CIDR ranges (e.g., `192.168.100.0/24`).
-- `connect_container_to_network(container, network, ip_address)`: Connects a container to a network, with optional static IP assignment.
-- `disconnect_container_from_network(container, network, force)`: Detaches a container from a network.
-- `remove_network(network_name_or_id: str)`: Deletes an unused network.
-
-### 5. Volume & Storage Management
-- `list_volumes()`: Lists all persistent data volumes and driver metadata.
-- `inspect_volume(name: str)`: Inspects volume details, host mountpoints, and labels.
-- `create_volume(name: str, driver: str, labels: dict)`: Provisions a named persistent storage volume.
-- `remove_volume(name: str, force: bool)`: Safely deletes a volume (protected if in active use).
-- `prune_volumes()`: Removes orphaned volumes to reclaim embedded flash space.
-
-### 6. System Diagnostics & Maintenance
-- `get_docker_system_info()`: Overview of host OS (Buildroot/Alpine/Ubuntu), CPU architecture (`aarch64`, `x86_64`), total RAM, and Docker version.
-- `get_system_disk_usage()`: Comprehensive storage report (`docker system df`).
-- `prune_system(all: bool)`: Automatic cleanup of stopped containers, dangling images, and unused networks.
-
----
-
-## 🚀 Deployment Guide (via Portainer)
-
-Deploying to an embedded controller without host shell access:
-
-### Step 1: Build the Image in Portainer
-1. Upload the provided build bundle:
-   - `mcp-server-build.tar.gz` (or `mcp-server-build.zip`)
-2. In Portainer, navigate to **Images** ➔ **+ Build a new image**.
-3. Set **Name** to: `mcp-portainer-alternative:latest`.
-4. Choose **Upload**, select the archive, and click **Build the image**.
-
-### Step 2: Deploy the Stack
-1. In Portainer, go to **Stacks** ➔ **+ Add stack**.
-2. Name the stack (e.g., `mcp-manager`).
-3. Paste the following Compose configuration:
+Save the following configuration as `docker-compose.yml`:
 
 ```yaml
 version: '3.8'
 
 services:
   mcp-server:
-    image: mcp-portainer-alternative:latest
-    container_name: mcp-portainer-alternative
+    image: mcp-docker-manager:latest
+    container_name: mcp-docker-manager
     restart: unless-stopped
     user: "0:0"
     ports:
@@ -97,28 +34,42 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - MCP_PORT=8443
-      - PROTECTED_CONTAINERS=mcp-portainer-alternative
+      - PROTECTED_CONTAINERS=mcp-docker-manager
 ```
 
-4. Click **Deploy the stack**.
+Run the container:
 
-The MCP Server is immediately reachable on your controller's IP:
+```bash
+docker compose up -d
 ```
-http://<DEVICE_IP>:8443/sse
+
+### 2. Building the Image Locally
+
+```bash
+docker build -t mcp-docker-manager:latest .
 ```
 
 ---
 
-## 🔌 Connecting to MCP Clients
+## Configuration
 
-### Antigravity / Claude Desktop / Custom Client
-Add the server entry to your MCP client configuration:
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `MCP_PORT` | `8443` | Port used by the SSE HTTP server. |
+| `DOCKER_HOST` | `http://127.0.0.1:2375` | Fallback TCP host if Unix socket is unavailable. |
+| `PROTECTED_CONTAINERS` | `mcp-docker-manager` | Comma-separated list of container names immune to stop or remove actions. |
+
+---
+
+## Connecting to an MCP Client
+
+Add the server to your MCP client configuration (e.g., Antigravity, Claude Desktop, or custom orchestrators):
 
 ```json
 {
   "mcpServers": {
-    "embedded-docker-manager": {
-      "url": "http://192.168.18.137:8443/sse"
+    "docker-manager": {
+      "url": "http://<HOST_IP>:8443/sse"
     }
   }
 }
@@ -126,5 +77,17 @@ Add the server entry to your MCP client configuration:
 
 ---
 
-## 📜 License
-MIT License. Created for safe, automated interaction with embedded and edge software products.
+## Available Tools
+
+- **Stacks**: `deploy_stack`, `list_stacks`, `inspect_stack`, `remove_stack`
+- **Containers**: `create_container`, `list_containers`, `inspect_container`, `start_container`, `stop_container`, `restart_container`, `pause_container`, `unpause_container`, `remove_container`, `rename_container`, `get_container_logs`, `get_container_stats`
+- **Images**: `list_images`, `pull_image`, `remove_image`
+- **Networks**: `list_networks`, `inspect_network`, `create_network`, `remove_network`, `connect_container_to_network`, `disconnect_container_from_network`, `get_ethernet_interfaces`
+- **Volumes**: `list_volumes`, `inspect_volume`, `create_volume`, `remove_volume`, `prune_volumes`
+- **System**: `get_docker_system_info`, `get_system_disk_usage`, `prune_system`
+
+---
+
+## License
+
+MIT
