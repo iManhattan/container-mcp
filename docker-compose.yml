@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  # Servidor MCP Seguro - Substituto do Portainer
+  # Conecta diretamente no socket do Docker do Nexto via Unix Socket
+  mcp-server:
+    image: mcp-portainer-alternative:latest
+    container_name: mcp-portainer-alternative
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - /codesys/NextoUser/Files/docker.sock:/var/run/docker.sock
+    environment:
+      - MCP_PORT=8443
+      - PROTECTED_CONTAINERS=mcp-portainer-alternative
