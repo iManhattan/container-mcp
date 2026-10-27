@@ -9,13 +9,14 @@ A lightweight and secure **Model Context Protocol (MCP)** server for interacting
 - **Safe Automation**: Full Docker lifecycle management via structured JSON-RPC tools with zero interactive shell access.
 - **Compose Stacks**: Deploy, list, inspect, and remove multi-container stacks.
 - **Resource Management**: Manage containers, images, persistent volumes, and networks.
-- **Embedded Friendly**: Minimal resource consumption (< 70 MB RAM) running on x86_64 and ARM64 architectures.
+- **Multi-Architecture**: Pre-built for both **ARM64** (embedded Linux, PLCs, SBCs) and **x86_64** architectures.
+- **Minimal Footprint**: Lightweight execution (< 70 MB RAM).
 
 ---
 
 ## Installation
 
-### 1. Docker Compose (Recommended)
+### 1. Docker Compose (Quickstart)
 
 Save the following configuration as `docker-compose.yml`:
 
@@ -24,7 +25,7 @@ version: '3.8'
 
 services:
   mcp-server:
-    image: mcp-docker-manager:latest
+    image: ghcr.io/imanhattan/container-mcp:latest
     container_name: mcp-docker-manager
     restart: unless-stopped
     user: "0:0"
@@ -43,7 +44,7 @@ Run the container:
 docker compose up -d
 ```
 
-### 2. Building the Image Locally
+### 2. Building Locally (Optional)
 
 ```bash
 docker build -t mcp-docker-manager:latest .
