@@ -1,94 +1,65 @@
-# Embedded Docker MCP Server
+# Safe Docker MCP Server - Suíte Industrial Completa (38 Tools)
 
-A lightweight and secure **Model Context Protocol (MCP)** server for interacting with Docker environments via AI assistants and automation tools without exposing terminal or host shell access.
-
----
-
-## Features
-
-- **Safe Automation**: Full Docker lifecycle management via structured JSON-RPC tools with zero interactive shell access.
-- **Compose Stacks**: Deploy, list, inspect, and remove multi-container stacks.
-- **Resource Management**: Manage containers, images, persistent volumes, and networks.
-- **Multi-Architecture**: Pre-built for both **ARM64** (embedded Linux, PLCs, SBCs) and **x86_64** architectures.
-- **Minimal Footprint**: Lightweight execution (< 70 MB RAM).
+Servidor MCP (**Model Context Protocol**) de alto desempenho e segurança para produtos de software embarcado com Docker (Altus Nexto / CODESYS / Linux Industrial / Buildroot / Ubuntu). Substitui integralmente o Portainer para automações inteligentes e agentes de IA sem qualquer risco de acesso indevido ao terminal (shell) do sistema operacional.
 
 ---
 
-## Installation
+## 🛠️ Catálogo Completo de Ferramentas (38 Tools)
 
-### 1. Docker Compose (Quickstart)
+### 1. Gestão de Stacks (Docker Compose)
+- `deploy_stack(stack_name, compose_yaml)`: Realiza deploy atômico de Stacks a partir de YAML, suportando mapeamento de portas, variáveis, volumes, redes e limites de memória/CPU (`mem_limit`, `cpu_shares`).
+- `list_stacks()`: Lista todas as Stacks implantadas com contagem de serviços e status.
+- `inspect_stack(stack_name)`: Detalha serviços, imagens e contêineres de uma Stack.
+- `remove_stack(stack_name)`: Para e remove com segurança todos os recursos da Stack.
 
-Save the following configuration as `docker-compose.yml`:
+### 2. Gestão de Contêineres (Containers)
+- `create_container(image, name, ports, env, volumes, cmd, restart_policy, memory_limit_mb, cpu_shares, auto_start)`: Cria contêineres com controle rígido de quotas de RAM/CPU e proteção contra montagens perigosas de volumes.
+- `list_containers(all)`: Inventário detalhado de contêineres em execução ou parados.
+- `inspect_container(name_or_id)`: Inspeção técnica completa (IPs, portas, mounts, estado de execução).
+- `start_container(name_or_id)`: Inicia um contêiner parado.
+- `stop_container(name_or_id)`: Para um contêiner de forma graciosa (com proteção de autodestruição).
+- `restart_container(name_or_id)`: Reinicia um contêiner.
+- `remove_container(name_or_id, force)`: Deleta um contêiner (com bloqueio para protegidos).
+- `rename_container(name_or_id, new_name)`: Renomeia um contêiner existente.
+- `update_container_resources(name_or_id, memory_limit_mb, cpu_shares)`: Ajusta dinamicamente os limites de RAM e CPU em tempo de execução.
+- `get_container_processes(name_or_id, ps_args)`: Lista os processos e comandos ativos dentro do contêiner (equivalente à aba Processes do Portainer).
+- `get_container_logs(name_or_id, tail)`: Recupera logs filtrados e decodificados com demuxer padrão Docker (sem caracteres corrompidos).
+- `get_container_stats(name_or_id)`: Métricas em tempo real de consumo de CPU (%) e RAM (MB e %).
 
-```yaml
-version: '3.8'
+### 3. Gestão de Imagens e Ambientes Offline (Air-Gapped)
+- `list_images()`: Lista imagens locais com IDs, tags e tamanho em MB.
+- `pull_image(image_name, username, password)`: Baixa imagens públicas ou privadas com autenticação (Docker Hub, GHCR, Harbor).
+- `tag_image(source_image, target_repo, target_tag)`: Cria novos aliases/tags locais.
+- `load_image_from_file(tar_path)`: Carrega imagens a partir de arquivos `.tar` (essencial para CLPs sem internet).
+- `save_image_to_file(image_name, target_tar_path)`: Exporta imagens para arquivos `.tar` para backup offline.
+- `remove_image(image_name_or_id, force)`: Deleta imagens locais para liberar memória flash.
 
-services:
-  mcp-server:
-    image: ghcr.io/imanhattan/container-mcp:latest
-    container_name: mcp-docker-manager
-    restart: unless-stopped
-    user: "0:0"
-    ports:
-      - "8443:8443"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - MCP_PORT=8443
-      - PROTECTED_CONTAINERS=mcp-docker-manager
-```
+### 4. Redes e Ethernet Industrial (Networking)
+- `list_networks()`: Lista redes ativas e contagem de contêineres conectados.
+- `inspect_network(network_name_or_id)`: Inspeciona sub-redes, gateways e contêineres associados.
+- `create_network(name, driver, subnet, gateway)`: Cria redes customizadas com endereçamento CIDR estático.
+- `remove_network(network_name_or_id)`: Deleta uma rede existente.
+- `connect_container_to_network(container, network, ip_address)`: Vincula contêiner à rede com IP fixo opcional.
+- `disconnect_container_from_network(container, network, force)`: Desconecta contêiner de uma rede.
+- `get_ethernet_interfaces()`: Métricas de tráfego (RX/TX em MB) das interfaces Ethernet ativas.
 
-Run the container:
+### 5. Volumes e Armazenamento Persistente (Storage)
+- `list_volumes()`: Lista volumes de dados locais.
+- `inspect_volume(name)`: Detalha pontos de montagem e escopo no filesystem do host.
+- `create_volume(name, driver, labels)`: Cria volumes persistentes para aplicações industriais.
+- `remove_volume(name, force)`: Remove volumes não utilizados.
+- `prune_volumes()`: Limpeza em lote de volumes órfãos.
 
-```bash
-docker compose up -d
-```
-
-### 2. Building Locally (Optional)
-
-```bash
-docker build -t mcp-docker-manager:latest .
-```
-
----
-
-## Configuration
-
-| Environment Variable | Default | Description |
-| :--- | :--- | :--- |
-| `MCP_PORT` | `8443` | Port used by the SSE HTTP server. |
-| `DOCKER_HOST` | `http://127.0.0.1:2375` | Fallback TCP host if Unix socket is unavailable. |
-| `PROTECTED_CONTAINERS` | `mcp-docker-manager` | Comma-separated list of container names immune to stop or remove actions. |
-
----
-
-## Connecting to an MCP Client
-
-Add the server to your MCP client configuration (e.g., Antigravity, Claude Desktop, or custom orchestrators):
-
-```json
-{
-  "mcpServers": {
-    "docker-manager": {
-      "url": "http://<HOST_IP>:8443/sse"
-    }
-  }
-}
-```
+### 6. Diagnóstico de Hardware e Limpeza Geral
+- `get_host_diagnostics()`: Monitoramento de hardware (uptime, load average, RAM total/livre do host e disco de usuário do Nexto).
+- `get_docker_system_info()`: Visão global do Docker (versão, SO, arquitetura, CPUs).
+- `get_system_disk_usage()`: Detalhamento do uso de disco por camadas, contêineres e imagens.
+- `prune_system(all)`: Limpeza profunda de recursos órfãos para recuperação de memória flash.
 
 ---
 
-## Available Tools
-
-- **Stacks**: `deploy_stack`, `list_stacks`, `inspect_stack`, `remove_stack`
-- **Containers**: `create_container`, `list_containers`, `inspect_container`, `start_container`, `stop_container`, `restart_container`, `pause_container`, `unpause_container`, `remove_container`, `rename_container`, `get_container_logs`, `get_container_stats`
-- **Images**: `list_images`, `pull_image`, `remove_image`
-- **Networks**: `list_networks`, `inspect_network`, `create_network`, `remove_network`, `connect_container_to_network`, `disconnect_container_from_network`, `get_ethernet_interfaces`
-- **Volumes**: `list_volumes`, `inspect_volume`, `create_volume`, `remove_volume`, `prune_volumes`
-- **System**: `get_docker_system_info`, `get_system_disk_usage`, `prune_system`
-
----
-
-## License
-
-MIT
+## 🛡️ Diretrizes de Segurança Industrial
+1. **Sem Acesso ao Terminal**: Nenhuma ferramenta expõe comandos arbitrários de shell (`sh`/`bash`).
+2. **Whitelist de Montagens**: Caminhos críticos do host como `/`, `/var/run/docker.sock` e `/codesys` são bloqueados contra bind mounts arbitrários.
+3. **Contêineres Protegidos**: `mcp-docker-manager` e contêineres essenciais são imunizados contra paradas ou remoções acidentais.
+4. **Proteção Anti-OOM**: Criações e atualizações contam com limites superiores de memória RAM para proteger o runtime do CLP.

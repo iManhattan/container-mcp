@@ -15,9 +15,17 @@ Sem disponibilizar shell/terminal do sistema por diretriz de segurança.
 import os
 import socket
 import logging
+import base64
+import json
 from typing import List, Dict, Any, Optional
-from mcp.server.fastmcp import FastMCP
-import httpx
+try:
+    from mcp.server.fastmcp import FastMCP
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.mcpserver import MCPServer as FastMCP
+try:
+    import httpx
+except ImportError:
+    import httpx2 as httpx
 import yaml
 
 # Configuração de logs
@@ -25,12 +33,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("mcp-docker-manager")
 
 # Configurações de ambiente
-PROTECTED_CONTAINERS_RAW = os.getenv("PROTECTED_CONTAINERS", "mcp-portainer-alternative")
+PROTECTED_CONTAINERS_RAW = os.getenv("PROTECTED_CONTAINERS", "mcp-portainer-alternative,mcp-docker-manager")
 PROTECTED_CONTAINERS = [name.strip() for name in PROTECTED_CONTAINERS_RAW.split(",") if name.strip()]
 MCP_PORT = int(os.getenv("MCP_PORT", "8443"))
 
-# Inicializa o FastMCP escutando em 0.0.0.0
-mcp = FastMCP("Docker-Portainer-SafeMCP", host="0.0.0.0", port=MCP_PORT)
+# Inicializa o FastMCP escutando em 0.0.0.0 (compatível com FastMCP v1 e MCPServer v2)
+try:
+    mcp = FastMCP("Docker-Portainer-SafeMCP", host="0.0.0.0", port=MCP_PORT)
+except TypeError:
+    mcp = FastMCP("Docker-Portainer-SafeMCP")
 
 # Conexão direta com o Docker Engine via Unix Socket ou TCP
 DOCKER_SOCKET = "/var/run/docker.sock"
@@ -50,6 +61,40 @@ def _is_protected(name_or_id: str) -> bool:
         if protected in name_or_id:
             return True
     return False
+
+
+def _demux_docker_stream(raw: bytes) -> str:
+    """
+    Decodifica a stream multiplexada do Docker (stdout e stderr).
+    Cada frame possui um cabeçalho binário de 8 bytes:
+    [STREAM_TYPE (1 byte), 0, 0, 0, SIZE (4 bytes big-endian)].
+    Remove os bytes de controle e retorna texto limpo em UTF-8.
+    """
+    if not raw:
+        return ""
+
+    out = []
+    i = 0
+    n = len(raw)
+    is_multiplexed = False
+
+    while i + 8 <= n:
+        stream_type = raw[i]
+        # Checa cabeçalho padrão Docker (1 = stdout, 2 = stderr, 0 = stdin)
+        if stream_type in (0, 1, 2) and raw[i + 1 : i + 4] == b"\x00\x00\x00":
+            is_multiplexed = True
+            frame_size = int.from_bytes(raw[i + 4 : i + 8], byteorder="big")
+            i += 8
+            payload = raw[i : i + frame_size]
+            out.append(payload.decode("utf-8", errors="replace"))
+            i += frame_size
+        else:
+            break
+
+    if is_multiplexed and i == n:
+        return "".join(out)
+
+    return raw.decode("utf-8", errors="replace")
 
 
 # ============================================================================
@@ -89,6 +134,9 @@ def deploy_stack(stack_name: str, compose_yaml: str) -> Dict[str, Any]:
                 continue
 
             c_name = s_cfg.get("container_name") or f"{stack_name}_{s_name}"
+
+            if _is_protected(c_name):
+                return {"error": f"Ação Negada por Segurança: O serviço '{s_name}' tenta sobrescrever o contêiner protegido '{c_name}'."}
 
             old_c = client.get(f"/containers/{c_name}/json")
             if old_c.status_code == 200:
@@ -132,19 +180,39 @@ def deploy_stack(stack_name: str, compose_yaml: str) -> Dict[str, Any]:
             if isinstance(cmd, str):
                 cmd = ["sh", "-c", cmd]
 
+            # Limites de memória e CPU
+            host_config = {
+                "PortBindings": port_bindings,
+                "Binds": binds,
+                "NetworkMode": network_name,
+                "RestartPolicy": {"Name": s_cfg.get("restart", "unless-stopped")},
+                "Privileged": False
+            }
+
+            mem_limit_raw = s_cfg.get("mem_limit")
+            if mem_limit_raw:
+                if isinstance(mem_limit_raw, int):
+                    host_config["Memory"] = min(mem_limit_raw, 380 * 1024 * 1024)
+                elif isinstance(mem_limit_raw, str):
+                    s_lower = mem_limit_raw.lower().strip()
+                    if s_lower.endswith("m"):
+                        host_config["Memory"] = min(int(s_lower[:-1]), 380) * 1024 * 1024
+                    elif s_lower.endswith("g"):
+                        host_config["Memory"] = 380 * 1024 * 1024
+                    elif s_lower.endswith("k"):
+                        host_config["Memory"] = int(s_lower[:-1]) * 1024
+
+            cpu_shares_raw = s_cfg.get("cpu_shares")
+            if cpu_shares_raw and isinstance(cpu_shares_raw, int):
+                host_config["CpuShares"] = cpu_shares_raw
+
             payload = {
                 "Image": image,
                 "Cmd": cmd,
                 "Env": env_list,
                 "Labels": labels,
                 "ExposedPorts": exposed_ports,
-                "HostConfig": {
-                    "PortBindings": port_bindings,
-                    "Binds": binds,
-                    "NetworkMode": network_name,
-                    "RestartPolicy": {"Name": s_cfg.get("restart", "unless-stopped")},
-                    "Privileged": False
-                }
+                "HostConfig": host_config
             }
 
             check_img = client.get(f"/images/{image}/json")
@@ -660,9 +728,25 @@ def create_container(
     volumes: Optional[Dict[str, str]] = None,
     cmd: Optional[List[str]] = None,
     restart_policy: str = "unless-stopped",
+    memory_limit_mb: Optional[int] = None,
+    cpu_shares: Optional[int] = None,
     auto_start: bool = True
 ) -> Dict[str, Any]:
-    """Cria e opcionalmente inicia um novo contêiner Docker com regras de segurança embutidas."""
+    """
+    Cria e opcionalmente inicia um novo contêiner Docker com regras de segurança embutidas.
+    
+    Args:
+        image: Nome da imagem (ex: 'eclipse-mosquitto:latest', 'alpine').
+        name: Nome opcional para o contêiner.
+        ports: Mapeamento de portas {porta_container: porta_host} (ex: {'1883/tcp': 1883}).
+        env: Variáveis de ambiente {'CHAVE': 'VALOR'}.
+        volumes: Mapeamento de volumes {caminho_host: caminho_container}.
+        cmd: Comando executado dentro do contêiner como lista.
+        restart_policy: Política de reinicialização ('always', 'unless-stopped', 'on-failure', 'no').
+        memory_limit_mb: Limite máximo de memória RAM em megabytes (salvaguarda para o CLP).
+        cpu_shares: Peso relativo de CPU (ex: 512, 1024).
+        auto_start: Se True, inicia o contêiner imediatamente.
+    """
     binds = []
     if volumes:
         for host_path, container_path in volumes.items():
@@ -680,17 +764,24 @@ def create_container(
 
     env_list = [f"{k}={v}" for k, v in env.items()] if env else []
 
+    host_config = {
+        "PortBindings": port_bindings,
+        "Binds": binds,
+        "RestartPolicy": {"Name": restart_policy},
+        "Privileged": False,
+    }
+    if memory_limit_mb and memory_limit_mb > 0:
+        mem_clamped = min(memory_limit_mb, 380)
+        host_config["Memory"] = mem_clamped * 1024 * 1024
+    if cpu_shares and cpu_shares > 0:
+        host_config["CpuShares"] = cpu_shares
+
     payload = {
         "Image": image,
         "Cmd": cmd,
         "Env": env_list,
         "ExposedPorts": exposed_ports,
-        "HostConfig": {
-            "PortBindings": port_bindings,
-            "Binds": binds,
-            "RestartPolicy": {"Name": restart_policy},
-            "Privileged": False,
-        }
+        "HostConfig": host_config
     }
 
     try:
@@ -719,7 +810,7 @@ def create_container(
 
 @mcp.tool()
 def get_container_logs(name_or_id: str, tail: int = 100) -> str:
-    """Recupera os últimos logs (stdout/stderr) de um contêiner."""
+    """Recupera os últimos logs limpos (stdout/stderr sem caracteres de controle) de um contêiner."""
     try:
         resp = client.get(
             f"/containers/{name_or_id}/logs",
@@ -728,7 +819,7 @@ def get_container_logs(name_or_id: str, tail: int = 100) -> str:
         if resp.status_code == 404:
             return f"Contêiner '{name_or_id}' não encontrado."
         resp.raise_for_status()
-        return resp.text
+        return _demux_docker_stream(resp.content)
     except httpx.HTTPError as e:
         return f"Falha ao recuperar logs: {str(e)}"
 
@@ -833,6 +924,98 @@ def remove_container(name_or_id: str, force: bool = False) -> str:
         return f"Falha ao remover contêiner: {str(e)}"
 
 
+@mcp.tool()
+def update_container_resources(
+    name_or_id: str,
+    memory_limit_mb: Optional[int] = None,
+    cpu_shares: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Atualiza dinamicamente os limites de memória RAM e CPU de um contêiner em execução (sem recriá-lo).
+    
+    Args:
+        name_or_id: Nome ou ID do contêiner.
+        memory_limit_mb: Novo limite de memória RAM em megabytes (ex: 64, 128, máx 380 para proteger o CLP).
+        cpu_shares: Peso relativo de compartilhamento de CPU (ex: 512, 1024).
+    """
+    payload: Dict[str, Any] = {}
+    if memory_limit_mb is not None:
+        mem_clamped = min(memory_limit_mb, 380)
+        payload["Memory"] = mem_clamped * 1024 * 1024
+    if cpu_shares is not None:
+        payload["CpuShares"] = cpu_shares
+
+    if not payload:
+        return {"error": "Nenhum parâmetro de recurso fornecido (informe memory_limit_mb ou cpu_shares)."}
+
+    try:
+        resp = client.post(f"/containers/{name_or_id}/update", json=payload)
+        if resp.status_code == 404:
+            return {"error": f"Contêiner '{name_or_id}' não encontrado."}
+        resp.raise_for_status()
+        return {
+            "status": "success",
+            "container": name_or_id,
+            "message": f"Recursos do contêiner '{name_or_id}' atualizados com sucesso.",
+            "updated_resources": payload
+        }
+    except httpx.HTTPError as e:
+        return {"error": f"Falha ao atualizar recursos do contêiner: {str(e)}"}
+
+
+@mcp.tool()
+def get_container_processes(name_or_id: str, ps_args: str = "-ef") -> Dict[str, Any]:
+    """
+    Lista os processos em execução dentro de um contêiner (equivalente à aba Top/Processes do Portainer).
+    
+    Args:
+        name_or_id: Nome ou ID do contêiner.
+        ps_args: Argumentos passados para o utilitário ps (padrão: '-ef').
+    """
+    try:
+        resp = client.get(f"/containers/{name_or_id}/top", params={"ps_args": ps_args})
+        if resp.status_code == 404:
+            return {"error": f"Contêiner '{name_or_id}' não encontrado."}
+        resp.raise_for_status()
+        data = resp.json()
+        titles = data.get("Titles", [])
+        processes = data.get("Processes", [])
+        return {
+            "container": name_or_id,
+            "titles": titles,
+            "processes_count": len(processes),
+            "processes": [dict(zip(titles, proc)) for proc in processes]
+        }
+    except httpx.HTTPError as e:
+        return {"error": f"Falha ao listar processos do contêiner: {str(e)}"}
+
+
+@mcp.tool()
+def rename_container(name_or_id: str, new_name: str) -> Dict[str, Any]:
+    """
+    Renomeia um contêiner existente.
+    
+    Args:
+        name_or_id: Nome ou ID atual do contêiner.
+        new_name: Novo nome desejado para o contêiner.
+    """
+    if _is_protected(name_or_id):
+        return {"error": f"Ação Negada: O contêiner '{name_or_id}' é protegido pelo sistema e não pode ser renomeado."}
+    try:
+        resp = client.post(f"/containers/{name_or_id}/rename", params={"name": new_name})
+        if resp.status_code == 404:
+            return {"error": f"Contêiner '{name_or_id}' não encontrado."}
+        resp.raise_for_status()
+        return {
+            "status": "success",
+            "old_name": name_or_id,
+            "new_name": new_name,
+            "message": f"Contêiner renomeado de '{name_or_id}' para '{new_name}' com sucesso."
+        }
+    except httpx.HTTPError as e:
+        return {"error": f"Falha ao renomear contêiner: {str(e)}"}
+
+
 # ============================================================================
 # 5. GESTÃO DE IMAGENS (IMAGES)
 # ============================================================================
@@ -858,14 +1041,131 @@ def list_images() -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
-def pull_image(image_name: str) -> str:
-    """Baixa uma imagem do Docker Hub ou de um registry público."""
+def pull_image(
+    image_name: str,
+    username: Optional[str] = None,
+    password: Optional[str] = None
+) -> str:
+    """
+    Baixa uma imagem do Docker Hub ou de um registry privado (com autenticação opcional).
+    
+    Args:
+        image_name: Nome completo da imagem (ex: 'eclipse-mosquitto:latest', 'ghcr.io/org/repo:tag').
+        username: Nome de usuário do registry (opcional para repositórios privados).
+        password: Senha ou token de acesso pessoal (opcional).
+    """
+    headers = {}
+    if username and password:
+        auth_data = {"username": username, "password": password}
+        auth_b64 = base64.b64encode(json.dumps(auth_data).encode("utf-8")).decode("utf-8")
+        headers["X-Registry-Auth"] = auth_b64
+
     try:
-        resp = client.post("/images/create", params={"fromImage": image_name}, timeout=300.0)
+        resp = client.post(
+            "/images/create",
+            params={"fromImage": image_name},
+            headers=headers,
+            timeout=300.0
+        )
+        if resp.status_code == 404:
+            return f"Imagem '{image_name}' não encontrada no registry."
         resp.raise_for_status()
         return f"Download da imagem '{image_name}' concluído com sucesso."
     except httpx.HTTPError as e:
         return f"Falha ao baixar imagem: {str(e)}"
+
+
+@mcp.tool()
+def tag_image(source_image: str, target_repo: str, target_tag: str = "latest") -> str:
+    """
+    Cria uma nova tag/alias para uma imagem Docker existente.
+    
+    Args:
+        source_image: Nome ou ID da imagem de origem.
+        target_repo: Novo repositório/nome para a tag (ex: 'meu-clp/aplicacao').
+        target_tag: Tag da imagem (padrão: 'latest').
+    """
+    try:
+        resp = client.post(
+            f"/images/{source_image}/tag",
+            params={"repo": target_repo, "tag": target_tag}
+        )
+        if resp.status_code == 404:
+            return f"Imagem '{source_image}' não encontrada."
+        resp.raise_for_status()
+        return f"Imagem '{source_image}' etiquetada com sucesso como '{target_repo}:{target_tag}'."
+    except httpx.HTTPError as e:
+        return f"Falha ao etiquetar imagem: {str(e)}"
+
+
+@mcp.tool()
+def load_image_from_file(tar_path: str) -> Dict[str, Any]:
+    """
+    Carrega uma imagem Docker a partir de um arquivo .tar existente no disco do equipamento.
+    Indispensável para ambientes industriais offline (sem acesso à internet).
+    
+    Args:
+        tar_path: Caminho completo para o arquivo tar (ex: '/codesys/NextoUser/Files/minha_imagem.tar').
+    """
+    if not (tar_path.startswith("/codesys/NextoUser") or tar_path.startswith("/tmp") or tar_path.startswith("/var")):
+        return {"error": f"Ação Negada por Segurança: Caminho '{tar_path}' fora das pastas autorizadas."}
+
+    if not os.path.exists(tar_path):
+        return {"error": f"Arquivo '{tar_path}' não encontrado no sistema de arquivos do CLP."}
+
+    try:
+        with open(tar_path, "rb") as f:
+            tar_data = f.read()
+
+        resp = client.post(
+            "/images/load",
+            content=tar_data,
+            headers={"Content-Type": "application/x-tar"},
+            timeout=300.0
+        )
+        resp.raise_for_status()
+        return {
+            "status": "success",
+            "file": tar_path,
+            "output": resp.text.strip(),
+            "message": f"Imagem(ns) carregada(s) com sucesso a partir de '{tar_path}'."
+        }
+    except Exception as e:
+        return {"error": f"Falha ao carregar imagem do arquivo tar: {str(e)}"}
+
+
+@mcp.tool()
+def save_image_to_file(image_name: str, target_tar_path: str) -> Dict[str, Any]:
+    """
+    Exporta uma imagem Docker para um arquivo tar no disco do equipamento (backup offline).
+    
+    Args:
+        image_name: Nome ou tag da imagem a exportar.
+        target_tar_path: Caminho de destino para salvar o .tar (ex: '/codesys/NextoUser/Files/backup_img.tar').
+    """
+    if not (target_tar_path.startswith("/codesys/NextoUser") or target_tar_path.startswith("/tmp") or target_tar_path.startswith("/var")):
+        return {"error": f"Ação Negada por Segurança: Caminho '{target_tar_path}' fora das pastas autorizadas."}
+
+    try:
+        resp = client.get(f"/images/{image_name}/get", timeout=300.0)
+        if resp.status_code == 404:
+            return {"error": f"Imagem '{image_name}' não encontrada."}
+        resp.raise_for_status()
+
+        os.makedirs(os.path.dirname(os.path.abspath(target_tar_path)), exist_ok=True)
+        with open(target_tar_path, "wb") as f:
+            f.write(resp.content)
+
+        size_mb = os.path.getsize(target_tar_path) / (1024 * 1024)
+        return {
+            "status": "success",
+            "image": image_name,
+            "file": target_tar_path,
+            "size_mb": round(size_mb, 2),
+            "message": f"Imagem '{image_name}' exportada com sucesso para '{target_tar_path}'."
+        }
+    except Exception as e:
+        return {"error": f"Falha ao salvar imagem para arquivo tar: {str(e)}"}
 
 
 @mcp.tool()
@@ -883,6 +1183,51 @@ def remove_image(image_name_or_id: str, force: bool = False) -> str:
 # ============================================================================
 # 6. DIAGNÓSTICO, ARMAZENAMENTO E LIMPEZA
 # ============================================================================
+
+@mcp.tool()
+def get_host_diagnostics() -> Dict[str, Any]:
+    """
+    Retorna métricas de integridade de hardware do CLP (uptime, carga, memória livre da CPU e partições).
+    """
+    diag: Dict[str, Any] = {}
+    try:
+        if os.path.exists("/proc/uptime"):
+            with open("/proc/uptime", "r") as f:
+                uptime_sec = float(f.read().split()[0])
+                diag["uptime_hours"] = round(uptime_sec / 3600, 2)
+
+        if os.path.exists("/proc/loadavg"):
+            with open("/proc/loadavg", "r") as f:
+                load = f.read().split()[:3]
+                diag["load_average"] = [float(x) for x in load]
+
+        if os.path.exists("/proc/meminfo"):
+            mem: Dict[str, float] = {}
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        val = parts[1].strip().split()[0]
+                        if key in ("MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached"):
+                            mem[key] = round(int(val) / 1024, 2)
+            diag["host_memory_mb"] = mem
+
+        check_path = "/codesys/NextoUser" if os.path.exists("/codesys/NextoUser") else "/"
+        if hasattr(os, "statvfs"):
+            stat = os.statvfs(check_path)
+            total_mb = (stat.f_blocks * stat.f_frsize) / (1024 * 1024)
+            free_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+            diag["disk_storage"] = {
+                "path": check_path,
+                "total_mb": round(total_mb, 2),
+                "free_mb": round(free_mb, 2),
+                "used_percent": round(((total_mb - free_mb) / total_mb) * 100, 1) if total_mb > 0 else 0
+            }
+    except Exception as e:
+        diag["error"] = f"Falha parcial ao ler diagnósticos do host: {str(e)}"
+
+    return diag
 
 @mcp.tool()
 def get_docker_system_info() -> Dict[str, Any]:
@@ -957,6 +1302,10 @@ def prune_system(all: bool = False) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     logger.info(f"Iniciando Complete MCP Docker Manager em SSE na porta {MCP_PORT} (0.0.0.0)...")
-    mcp.settings.host = "0.0.0.0"
-    mcp.settings.port = MCP_PORT
-    mcp.run(transport="sse")
+    if hasattr(mcp, "settings") and hasattr(mcp.settings, "host"):
+        mcp.settings.host = "0.0.0.0"
+        mcp.settings.port = MCP_PORT
+    try:
+        mcp.run(transport="sse")
+    except TypeError:
+        mcp.run(transport="sse", host="0.0.0.0", port=MCP_PORT)
