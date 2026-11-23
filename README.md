@@ -63,3 +63,39 @@ Servidor MCP (**Model Context Protocol**) de alto desempenho e segurança para p
 2. **Whitelist de Montagens**: Caminhos críticos do host como `/`, `/var/run/docker.sock` e `/codesys` são bloqueados contra bind mounts arbitrários.
 3. **Contêineres Protegidos**: `mcp-docker-manager` e contêineres essenciais são imunizados contra paradas ou remoções acidentais.
 4. **Proteção Anti-OOM**: Criações e atualizações contam com limites superiores de memória RAM para proteger o runtime do CLP.
+
+---
+
+## 🔌 Como Conectar no Claude Desktop (Ponte Python stdio ↔ SSE)
+
+O `claude_desktop_config.json` do Claude Desktop aceita apenas servidores iniciados localmente via `stdio` (`"command"` / `"args"`). Para conectar ao servidor remoto via SSE sem depender de Node.js, utilize a ponte [`mcp_stdio_bridge.py`](mcp_stdio_bridge.py) (zero dependências externas, apenas Python 3) ou `uvx mcp-proxy`:
+
+### Opção A: Usando `mcp_stdio_bridge.py` (Apenas Python 3, zero pacotes extras)
+```json
+{
+  "mcpServers": {
+    "docker-manager": {
+      "command": "python",
+      "args": [
+        "C:\\GitHub\\container-mcp\\mcp_stdio_bridge.py",
+        "http://192.168.18.137:8443/sse"
+      ]
+    }
+  }
+}
+```
+
+### Opção B: Usando `uvx mcp-proxy` (Caso possua `uv` instalado)
+```json
+{
+  "mcpServers": {
+    "docker-manager": {
+      "command": "uvx",
+      "args": [
+        "mcp-proxy",
+        "http://192.168.18.137:8443/sse"
+      ]
+    }
+  }
+}
+```
